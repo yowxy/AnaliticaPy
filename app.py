@@ -1,212 +1,203 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import io
-import base64
-import json
+import os
 
 app = Flask(__name__)
 
-# ── Generate synthetic e-commerce sales data ──────────────────────────────────
-np.random.seed(42)
-n = 500
+# Load dataset
+base_dir = os.path.dirname(os.path.abspath(__file__))
+csv_path = os.path.join(base_dir, 'data', 'online_sales_dataset.csv')
 
-categories  = ['Elektronik', 'Fashion', 'Makanan', 'Olahraga', 'Kecantikan']
-cities      = ['Surabaya', 'Jakarta', 'Bandung', 'Medan', 'Semarang']
-months      = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des']
+# Read CSV and clean column headers
+df = pd.read_csv(csv_path)
+df.columns = [c.strip().lower().replace(' ', '_') for c in df.columns]
 
-raw = {
-    'bulan'    : np.random.choice(months, n),
-    'kategori' : np.random.choice(categories, n),
-    'kota'     : np.random.choice(cities, n),
-    'penjualan': np.random.randint(1, 50, n),
-    'harga'    : np.random.choice([150000, 250000, 500000, 750000, 1000000], n),
-    'rating'   : np.round(np.random.uniform(3.0, 5.0, n), 1),
-}
-df = pd.DataFrame(raw)
-df['total_pendapatan'] = df['penjualan'] * df['harga']
+# Parse date column
+df['date'] = pd.to_datetime(df['date'])
+df['month_name'] = df['date'].dt.strftime('%b')
+df['month_num'] = df['date'].dt.month
 
-MONTH_ORDER = {m: i for i, m in enumerate(months)}
-
-PALETTE = {
-    'Elektronik' : '#7F77DD',
-    'Fashion'    : '#D4537E',
-    'Makanan'    : '#1D9E75',
-    'Olahraga'   : '#BA7517',
-    'Kecantikan' : '#D85A30',
-}
-
-def fig_to_b64(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=110, bbox_inches='tight',
-                facecolor='none', transparent=True)
-    buf.seek(0)
-    encoded = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close(fig)
-    return encoded
-
-# ── Chart helpers ─────────────────────────────────────────────────────────────
-
-def chart_tren_pendapatan():
-    monthly = (df.groupby('bulan')['total_pendapatan']
-                 .sum()
-                 .reindex(months))
-    fig, ax = plt.subplots(figsize=(9, 3.6))
-    ax.fill_between(range(len(months)), monthly.values / 1e6,
-                    alpha=0.18, color='#7F77DD')
-    ax.plot(range(len(months)), monthly.values / 1e6,
-            color='#7F77DD', linewidth=2.5, marker='o', markersize=5)
-    ax.set_xticks(range(len(months)))
-    ax.set_xticklabels(months, fontsize=10)
-    ax.set_ylabel('Pendapatan (Juta Rp)', fontsize=10)
-    ax.yaxis.set_tick_params(labelsize=9)
-    ax.spines[['top','right']].set_visible(False)
-    ax.spines[['left','bottom']].set_color('#e0e0e0')
-    ax.grid(axis='y', color='#f0f0f0', linewidth=0.8)
-    fig.tight_layout()
-    return fig_to_b64(fig)
-
-def chart_kategori():
-    cat = (df.groupby('kategori')['total_pendapatan']
-             .sum()
-             .sort_values(ascending=True))
-    colors = [PALETTE[k] for k in cat.index]
-    fig, ax = plt.subplots(figsize=(7, 3.4))
-    bars = ax.barh(cat.index, cat.values / 1e6, color=colors,
-                   height=0.55, edgecolor='none')
-    for bar, val in zip(bars, cat.values):
-        ax.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2,
-                f'Rp {val/1e6:.0f} Jt', va='center', fontsize=9,
-                color='#555')
-    ax.set_xlabel('Pendapatan (Juta Rp)', fontsize=10)
-    ax.spines[['top','right','left']].set_visible(False)
-    ax.spines['bottom'].set_color('#e0e0e0')
-    ax.grid(axis='x', color='#f0f0f0', linewidth=0.8)
-    ax.tick_params(axis='y', labelsize=10)
-    fig.tight_layout()
-    return fig_to_b64(fig)
-
-def chart_kota():
-    kota = (df.groupby('kota')[['penjualan','total_pendapatan']]
-              .agg({'penjualan':'sum','total_pendapatan':'sum'})
-              .sort_values('total_pendapatan', ascending=False))
-    x     = np.arange(len(kota))
-    width = 0.38
-    fig, ax1 = plt.subplots(figsize=(8, 3.6))
-    ax2 = ax1.twinx()
-    b1 = ax1.bar(x - width/2, kota['penjualan'],
-                 width, color='#5DCAA5', label='Unit Terjual', edgecolor='none')
-    b2 = ax2.bar(x + width/2, kota['total_pendapatan']/1e6,
-                 width, color='#7F77DD', label='Pendapatan (Jt Rp)', edgecolor='none', alpha=0.85)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(kota.index, fontsize=10)
-    ax1.set_ylabel('Unit Terjual', color='#1D9E75', fontsize=10)
-    ax2.set_ylabel('Pendapatan (Jt Rp)', color='#534AB7', fontsize=10)
-    ax1.tick_params(axis='y', colors='#1D9E75')
-    ax2.tick_params(axis='y', colors='#534AB7')
-    for sp in ['top']: ax1.spines[sp].set_visible(False)
-    ax1.spines['bottom'].set_color('#e0e0e0')
-    lines = [mpatches.Patch(color='#5DCAA5', label='Unit Terjual'),
-             mpatches.Patch(color='#7F77DD', label='Pendapatan')]
-    ax1.legend(handles=lines, loc='upper right', fontsize=9,
-               frameon=False)
-    fig.tight_layout()
-    return fig_to_b64(fig)
-
-def chart_rating():
-    cat_rating = (df.groupby('kategori')['rating']
-                    .mean()
-                    .sort_values(ascending=False))
-    colors = [PALETTE[k] for k in cat_rating.index]
-    fig, ax = plt.subplots(figsize=(7, 3.2))
-    bars = ax.bar(cat_rating.index, cat_rating.values,
-                  color=colors, width=0.5, edgecolor='none')
-    for bar, val in zip(bars, cat_rating.values):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                f'{val:.2f}', ha='center', fontsize=9, color='#555')
-    ax.set_ylim(3.0, 5.2)
-    ax.set_ylabel('Rata-rata Rating', fontsize=10)
-    ax.spines[['top','right']].set_visible(False)
-    ax.spines[['left','bottom']].set_color('#e0e0e0')
-    ax.grid(axis='y', color='#f0f0f0', linewidth=0.8)
-    ax.tick_params(axis='x', labelsize=10)
-    fig.tight_layout()
-    return fig_to_b64(fig)
-
-def chart_heatmap():
-    pivot = df.pivot_table(index='kategori', columns='bulan',
-                           values='penjualan', aggfunc='sum')
-    pivot = pivot.reindex(columns=months)
-    fig, ax = plt.subplots(figsize=(11, 3.4))
-    im = ax.imshow(pivot.values, aspect='auto', cmap='YlOrRd')
-    ax.set_xticks(range(len(months)))
-    ax.set_xticklabels(months, fontsize=9)
-    ax.set_yticks(range(len(pivot.index)))
-    ax.set_yticklabels(pivot.index, fontsize=10)
-    for i in range(len(pivot.index)):
-        for j in range(len(months)):
-            ax.text(j, i, int(pivot.values[i, j]),
-                    ha='center', va='center', fontsize=8,
-                    color='white' if pivot.values[i,j] > pivot.values.max()*0.6 else '#333')
-    plt.colorbar(im, ax=ax, label='Unit Terjual', shrink=0.8)
-    ax.spines[:].set_visible(False)
-    fig.tight_layout()
-    return fig_to_b64(fig)
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-
+# Routes
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/api/summary')
 def api_summary():
+    total_revenue = float(df['total_revenue'].sum())
+    total_transactions = int(df.shape[0])
+    total_units_sold = int(df['units_sold'].sum())
+    avg_unit_price = float(df['unit_price'].mean())
+    
+    top_category = df.groupby('product_category')['total_revenue'].sum().idxmax()
+    top_region = df.groupby('region')['total_revenue'].sum().idxmax()
+    
     return jsonify({
-        'total_pendapatan' : int(df['total_pendapatan'].sum()),
-        'total_transaksi'  : int(len(df)),
-        'total_unit'       : int(df['penjualan'].sum()),
-        'avg_rating'       : round(float(df['rating'].mean()), 2),
-        'top_kategori'     : df.groupby('kategori')['total_pendapatan'].sum().idxmax(),
-        'top_kota'         : df.groupby('kota')['total_pendapatan'].sum().idxmax(),
+        'total_pendapatan': total_revenue,
+        'total_transaksi': total_transactions,
+        'total_unit': total_units_sold,
+        'avg_harga': avg_unit_price,
+        'top_kategori': top_category,
+        'top_region': top_region
     })
 
 @app.route('/api/charts/tren')
 def api_tren():
-    return jsonify({'image': chart_tren_pendapatan()})
+    monthly = df.groupby(['month_num', 'month_name'])['total_revenue'].sum().reset_index()
+    monthly = monthly.sort_values('month_num')
+    return jsonify({
+        'labels': monthly['month_name'].tolist(),
+        'values': monthly['total_revenue'].tolist()
+    })
 
 @app.route('/api/charts/kategori')
 def api_kategori():
-    return jsonify({'image': chart_kategori()})
+    cat = df.groupby('product_category')['total_revenue'].sum().reset_index()
+    cat = cat.sort_values('total_revenue', ascending=False)
+    return jsonify({
+        'labels': cat['product_category'].tolist(),
+        'values': cat['total_revenue'].tolist()
+    })
 
-@app.route('/api/charts/kota')
-def api_kota():
-    return jsonify({'image': chart_kota()})
+@app.route('/api/charts/payment')
+def api_payment():
+    pay = df.groupby('payment_method')['total_revenue'].sum().reset_index()
+    pay = pay.sort_values('total_revenue', ascending=False)
+    return jsonify({
+        'labels': pay['payment_method'].tolist(),
+        'values': pay['total_revenue'].tolist()
+    })
 
-@app.route('/api/charts/rating')
-def api_rating():
-    return jsonify({'image': chart_rating()})
+@app.route('/api/charts/region')
+def api_region():
+    reg = df.groupby('region').agg(
+        total_revenue=('total_revenue', 'sum'),
+        units_sold=('units_sold', 'sum')
+    ).reset_index().sort_values('total_revenue', ascending=False)
+    return jsonify({
+        'labels': reg['region'].tolist(),
+        'revenue': reg['total_revenue'].tolist(),
+        'units': reg['units_sold'].tolist()
+    })
+
+@app.route('/api/charts/top_produk')
+def api_top_produk():
+    top_p = df.groupby('product_name').agg(
+        revenue=('total_revenue', 'sum'),
+        units=('units_sold', 'sum')
+    ).reset_index().sort_values('revenue', ascending=False).head(10)
+    return jsonify({
+        'labels': top_p['product_name'].tolist(),
+        'revenue': top_p['revenue'].tolist(),
+        'units': top_p['units'].tolist()
+    })
 
 @app.route('/api/charts/heatmap')
 def api_heatmap():
-    return jsonify({'image': chart_heatmap()})
+    pivot = df.pivot_table(
+        index='product_category',
+        columns=['month_num', 'month_name'],
+        values='units_sold',
+        aggfunc='sum',
+        fill_value=0
+    )
+    # Reindex columns to sort chronologically by month_num
+    pivot = pivot.reindex(sorted(pivot.columns, key=lambda x: x[0]), axis=1)
+    
+    series = []
+    for cat in pivot.index:
+        data = []
+        for (month_num, month_name) in pivot.columns:
+            data.append({
+                'x': month_name,
+                'y': int(pivot.loc[cat, (month_num, month_name)])
+            })
+        series.append({
+            'name': cat,
+            'data': data
+        })
+    return jsonify(series)
 
 @app.route('/api/tabel')
 def api_tabel():
-    tabel = (df.groupby(['kategori','kota'])
-               .agg(
-                   unit_terjual   = ('penjualan','sum'),
-                   total_pendapatan = ('total_pendapatan','sum'),
-                   avg_rating     = ('rating','mean'),
-               )
-               .reset_index()
-               .sort_values('total_pendapatan', ascending=False)
-               .head(20))
-    tabel['avg_rating'] = tabel['avg_rating'].round(2)
-    return jsonify(tabel.to_dict(orient='records'))
+    table_df = df.groupby(['product_category', 'region']).agg(
+        unit_terjual=('units_sold', 'sum'),
+        total_pendapatan=('total_revenue', 'sum'),
+        avg_harga=('unit_price', 'mean'),
+        jumlah_transaksi=('transaction_id', 'count')
+    ).reset_index().sort_values('total_pendapatan', ascending=False).head(20)
+    
+    table_df['avg_harga'] = table_df['avg_harga'].round(2)
+    table_df = table_df.rename(columns={
+        'product_category': 'kategori',
+        'region': 'region'
+    })
+    return jsonify(table_df.to_dict(orient='records'))
+
+@app.route('/api/transactions')
+def api_transactions():
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 10))
+    search = request.args.get('search', '').strip().lower()
+    category = request.args.get('category', 'all')
+    region = request.args.get('region', 'all')
+    sort_by = request.args.get('sort_by', 'date')
+    sort_order = request.args.get('sort_order', 'desc')
+    
+    filtered_df = df.copy()
+    
+    # Search filter
+    if search:
+        filtered_df = filtered_df[
+            filtered_df['product_name'].str.lower().str.contains(search) |
+            filtered_df['product_category'].str.lower().str.contains(search) |
+            filtered_df['region'].str.lower().str.contains(search) |
+            filtered_df['payment_method'].str.lower().str.contains(search)
+        ]
+        
+    # Category filter
+    if category != 'all':
+        filtered_df = filtered_df[filtered_df['product_category'] == category]
+        
+    # Region filter
+    if region != 'all':
+        filtered_df = filtered_df[filtered_df['region'] == region]
+        
+    # Sort
+    ascending = (sort_order == 'asc')
+    if sort_by in filtered_df.columns:
+        filtered_df = filtered_df.sort_values(sort_by, ascending=ascending)
+    else:
+        # Default to date
+        filtered_df = filtered_df.sort_values('date', ascending=ascending)
+        
+    total_records = len(filtered_df)
+    total_pages = max(1, int(np.ceil(total_records / limit)))
+    
+    # Page boundary check
+    page = max(1, min(page, total_pages))
+    
+    # Slice for page
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+    sliced_df = filtered_df.iloc[start_idx:end_idx].copy()
+    
+    # Format dates to string
+    sliced_df['date'] = sliced_df['date'].dt.strftime('%Y-%m-%d')
+    
+    # Get lists for filters in UI
+    categories_list = sorted(df['product_category'].unique().tolist())
+    regions_list = sorted(df['region'].unique().tolist())
+    
+    return jsonify({
+        'transactions': sliced_df.to_dict(orient='records'),
+        'total_pages': total_pages,
+        'total_records': total_records,
+        'current_page': page,
+        'categories': categories_list,
+        'regions': regions_list
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
